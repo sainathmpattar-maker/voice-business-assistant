@@ -1,0 +1,22 @@
+services:
+  # ── Backend FastAPI Web Service ──────────────────────────────────────────────
+  - type: web
+    name: polaris-backend
+    env: python
+    rootDir: backend
+    buildCommand: "pip install -r requirements.txt && python seed.py"
+    startCommand: "uvicorn main:app --host 0.0.0.0 --port $PORT"
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: ALLOWED_ORIGINS
+        value: "https://*.vercel.app,http://localhost:5173"
+      - key: MERCHANT_ID
+        value: "1"
+      - key: LOG_LEVEL
+        value: "INFO"
+
