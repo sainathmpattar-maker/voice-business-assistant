@@ -67,3 +67,11 @@ app.include_router(insights_router)
 @app.get("/", include_in_schema=False)
 def root():
     return {"message": "Polaris Voice Assistant — see /docs for API reference"}
+
+
+if __name__ == "__main__":
+    import os
+    import uvicorn
+
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port)

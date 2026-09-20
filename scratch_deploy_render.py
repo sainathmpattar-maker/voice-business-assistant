@@ -95,9 +95,25 @@ def main():
         service_url = service_obj.get("serviceDetails", {}).get("url")
         print(f"Service created successfully! ID: {service_id}, URL: {service_url}")
 
+    # Patch service details if needed
+    patch_payload = {
+        "serviceDetails": {
+            "envSpecificDetails": {
+                "buildCommand": "pip install -r requirements.txt",
+                "startCommand": "uvicorn main:app --host 0.0.0.0 --port $PORT"
+            },
+            "envVars": env_vars
+        }
+    }
+    requests.patch(f"https://api.render.com/v1/services/{service_id}", headers=HEADERS, json=patch_payload)
+
+    print("Triggering new deploy on Render...")
+    deploy_res = requests.post(f"https://api.render.com/v1/services/{service_id}/deploys", headers=HEADERS, json={"clearCache": "clear"})
+    print("Deploy trigger response:", deploy_res.status_code, deploy_res.text)
+
     # 3. Monitor Deploy Status
     print(f"\nMonitoring deployment for service {service_id}...")
-    for _ in range(60):
+    for i in range(40):
         time.sleep(10)
         res = requests.get(f"https://api.render.com/v1/services/{service_id}/deploys?limit=1", headers=HEADERS)
         if res.ok and res.json():
@@ -105,8 +121,10 @@ def main():
             status = latest_deploy.get("status")
             print(f"Deploy status: {status} (ID: {latest_deploy.get('id')})")
             if status == "live":
-                print("\nBackend is LIVE on Render!")
-                print(f"Render Service URL: {service_url}")
+                print("\n=======================================================")
+                print("  BACKEND IS LIVE ON RENDER!")
+                print(f"  URL: https://polaris-backend-3pl7.onrender.com")
+                print("=======================================================")
                 break
             elif status in ["build_failed", "update_failed", "canceled"]:
                 print(f"Deploy failed with status: {status}")
