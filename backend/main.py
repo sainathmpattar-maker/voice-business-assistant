@@ -30,9 +30,15 @@ async def lifespan(app: FastAPI):
     logger.info("Starting Polaris — initialising database …")
     eng = init_engine()
     Base.metadata.create_all(bind=eng)
-    logger.info("DB tables ready.")
+    try:
+        from seed import seed
+        seed()
+    except Exception as exc:
+        logger.warning("Database seed check: %s", exc)
+    logger.info("DB tables and seed data ready.")
     yield
     logger.info("Polaris shutting down.")
+
 
 
 app = FastAPI(
