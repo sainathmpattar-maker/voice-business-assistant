@@ -57,17 +57,46 @@ export interface TodaySalesData {
 const rawApiUrl = import.meta.env.VITE_API_URL || ''
 const API_BASE = rawApiUrl ? `${rawApiUrl.replace(/\/$/, '')}/api` : '/api'
 
+/**
+ * Derive a sensible filename + extension from a MIME type string.
+ * e.g. "audio/mp4" → "recording.mp4"
+ *      "audio/webm;codecs=opus" → "recording.webm"
+ */
+export function mimeToFilename(mimeType: string): string {
+  const base = mimeType.split(';')[0].trim().toLowerCase()
+  const map: Record<string, string> = {
+    'audio/webm': 'recording.webm',
+    'audio/ogg': 'recording.ogg',
+    'audio/mp4': 'recording.mp4',
+    'audio/x-m4a': 'recording.m4a',
+    'audio/mpeg': 'recording.mp3',
+    'audio/mp3': 'recording.mp3',
+    'audio/wav': 'recording.wav',
+    'audio/wave': 'recording.wav',
+  }
+  return map[base] ?? 'recording.webm'
+}
+
 export async function askVoice(
   audioBlob: Blob,
   merchantId = 1,
   sessionId?: string,
-  isPremium = false
+  isPremium = false,
+  languageHint?: string,
 ): Promise<AssistantResponseData> {
+  const mimeType = audioBlob.type || 'audio/webm'
+  const filename = mimeToFilename(mimeType)
+
   const formData = new FormData()
-  formData.append('audio', audioBlob, 'recording.webm')
+  // Append with correct filename so the backend sees the right extension
+  formData.append('audio', audioBlob, filename)
   formData.append('merchant_id', String(merchantId))
   if (sessionId) formData.append('session_id', sessionId)
   formData.append('is_premium', String(isPremium))
+  // Pass language hint when user has explicitly chosen one
+  if (languageHint && languageHint !== 'auto') {
+    formData.append('language_hint', languageHint)
+  }
 
   const res = await fetch(`${API_BASE}/voice/ask`, {
     method: 'POST',

@@ -75,7 +75,16 @@ def test_voice_ask_pipeline():
          patch("routers.voice.run_assistant", return_value=fake_llm), \
          patch("routers.voice.synthesize_speech", return_value="dummy_mp3_base64"):
 
-        fake_audio_file = io.BytesIO(b"RIFF....WAVEfmt ....data....")
+        # Build a >2 KB audio file so it passes the MIN_AUDIO_BYTES size guard
+        import wave
+        _buf = io.BytesIO()
+        with wave.open(_buf, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(16000)
+            wf.writeframes(b"\x00\x00" * 16000)  # 1 second of silence = 32 KB
+        _buf.seek(0)
+        fake_audio_file = _buf
         response = client.post(
             "/api/voice/ask",
             files={"audio": ("test.wav", fake_audio_file, "audio/wav")},

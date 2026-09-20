@@ -13,6 +13,24 @@ import {
 
 type MicState = 'idle' | 'listening' | 'thinking' | 'speaking'
 
+// ── Language selector ──────────────────────────────────────────────────────────
+// value = ISO-639-1 code sent to Whisper; 'auto' = no hint
+const LANGUAGE_OPTIONS = [
+  { value: 'auto', label: '🌐 Auto' },
+  { value: 'hi',   label: 'हि'   },
+  { value: 'ta',   label: 'த'   },
+  { value: 'te',   label: 'తె'   },
+  { value: 'kn',   label: 'ಕ'   },
+  { value: 'ml',   label: 'മ'   },
+  { value: 'mr',   label: 'म'   },
+  { value: 'bn',   label: 'বা'  },
+  { value: 'gu',   label: 'ગ'   },
+  { value: 'pa',   label: 'ਪ'   },
+  { value: 'en',   label: 'EN'  },
+] as const
+
+type LanguageCode = (typeof LANGUAGE_OPTIONS)[number]['value']
+
 interface Message {
   id: string
   sender: 'user' | 'assistant'
@@ -43,6 +61,11 @@ const DEMO_QUESTIONS = [
   { label: 'Loan Eligibility', lang: 'hindi', text: 'Mujhe working capital loan mil sakta hai kya?', icon: '💼' },
 ]
 
+// Minimum recording duration before we send audio to the backend
+const MIN_RECORDING_MS = 700
+// Minimum blob size guard (matches backend MIN_AUDIO_BYTES = 2048)
+const MIN_BLOB_BYTES = 2048
+
 export default function App() {
   const [micState, setMicState] = useState<MicState>('idle')
   const [messages, setMessages] = useState<Message[]>([])
@@ -55,13 +78,15 @@ export default function App() {
   const [errorBanner, setErrorBanner] = useState<string | null>(null)
   const [actionToast, setActionToast] = useState<string | null>(null)
   const [expandedDataUsed, setExpandedDataUsed] = useState<Record<string, boolean>>({})
+  const [selectedLanguage, setSelectedLanguage] = useState<LanguageCode>('auto')
 
   // Audio & recording refs
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
   const audioChunksRef = useRef<Blob[]>([])
   const currentAudioRef = useRef<HTMLAudioElement | null>(null)
   const messagesEndRef = useRef<HTMLDivElement | null>(null)
-  const isHoldingRef = useRef<boolean>(false)
+  const recordingStartRef = useRef<number>(0)
+  const micStreamRef = useRef<MediaStream | null>(null)
 
   // ── 1. Initial Data Fetch ──────────────────────────────────────────────────
   useEffect(() => {
@@ -88,6 +113,14 @@ export default function App() {
       setInsights(res.insights)
     } catch (err) {
       console.warn('Insights fetch error:', err)
+    }
+  }
+
+  // ── Helper: release mic stream ─────────────────────────────────────────────
+  const releaseMicStream = () => {
+    if (micStreamRef.current) {
+      micStreamRef.current.getTracks().forEach((t) => t.stop())
+      micStreamRef.current = null
     }
   }
 
@@ -130,41 +163,71 @@ export default function App() {
   }
 
   // ── 3. Voice Recording (MediaRecorder) ──────────────────────────────────────
+  /**
+   * Pick the best supported audio MIME type, trying in preference order.
+   * This is the key fix for Android/iOS: they produce audio/mp4 not audio/webm.
+   */
+  const pickMimeType = (): string => {
+    const candidates = [
+      'audio/webm;codecs=opus',
+      'audio/webm',
+      'audio/mp4',
+      'audio/ogg;codecs=opus',
+    ]
+    for (const mime of candidates) {
+      if (MediaRecorder.isTypeSupported(mime)) return mime
+    }
+    return '' // Let the browser decide
+  }
+
   const startRecording = async () => {
     setErrorBanner(null)
+
+    // Stop any currently playing audio
     if (currentAudioRef.current) {
       currentAudioRef.current.pause()
       currentAudioRef.current = null
     }
 
+    // Release any stale mic stream
+    releaseMicStream()
+
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      micStreamRef.current = stream
       audioChunksRef.current = []
 
-      // Choose supported mimeType
-      let mimeType = 'audio/webm'
-      if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
-        mimeType = 'audio/webm;codecs=opus'
-      } else if (MediaRecorder.isTypeSupported('audio/mp4')) {
-        mimeType = 'audio/mp4'
-      }
-
-      const recorder = new MediaRecorder(stream, { mimeType })
+      const mimeType = pickMimeType()
+      const recorderOptions = mimeType ? { mimeType } : {}
+      const recorder = new MediaRecorder(stream, recorderOptions)
       mediaRecorderRef.current = recorder
+      recordingStartRef.current = Date.now()
 
+      // timeslice=250ms ensures we get data even for very short recordings
       recorder.ondataavailable = (event) => {
-        if (event.data.size > 0) {
+        if (event.data && event.data.size > 0) {
           audioChunksRef.current.push(event.data)
         }
       }
 
       recorder.onstop = async () => {
-        const audioBlob = new Blob(audioChunksRef.current, { type: mimeType })
-        // Stop all tracks to release mic
-        stream.getTracks().forEach((track) => track.stop())
+        // Always release mic after recording stops
+        releaseMicStream()
 
-        if (audioBlob.size < 100) {
-          setErrorBanner('No audio recorded. Please try again.')
+        const elapsedMs = Date.now() - recordingStartRef.current
+        const actualMime = recorder.mimeType || mimeType || 'audio/webm'
+        const audioBlob = new Blob(audioChunksRef.current, { type: actualMime })
+
+        // Guard: too short in time
+        if (elapsedMs < MIN_RECORDING_MS) {
+          setErrorBanner('🎙️ Please hold the mic and speak a bit longer')
+          setMicState('idle')
+          return
+        }
+
+        // Guard: blob too small (browser may have captured silence only)
+        if (audioBlob.size < MIN_BLOB_BYTES) {
+          setErrorBanner('🎙️ Please hold the mic and speak a bit longer')
           setMicState('idle')
           return
         }
@@ -172,14 +235,16 @@ export default function App() {
         await handleAudioSubmit(audioBlob)
       }
 
-      recorder.start()
+      // Start with 250ms timeslice so chunks arrive frequently
+      recorder.start(250)
       setMicState('listening')
     } catch (err: any) {
+      releaseMicStream()
       console.error('Microphone access error:', err)
       setErrorBanner(
         err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError'
-          ? 'Microphone permission denied. Please allow mic access in your browser settings.'
-          : 'Could not access microphone.'
+          ? '🔇 Microphone permission denied. Please allow mic access in your browser settings.'
+          : '🎤 Could not access microphone. Please check your device settings.'
       )
       setMicState('idle')
     }
@@ -193,6 +258,9 @@ export default function App() {
   }
 
   const handleMicClick = () => {
+    // Ignore taps while thinking or speaking (prevents double-tap issues)
+    if (micState === 'thinking') return
+
     if (micState === 'idle') {
       startRecording()
     } else if (micState === 'listening') {
@@ -210,11 +278,31 @@ export default function App() {
   const handleAudioSubmit = async (audioBlob: Blob) => {
     setMicState('thinking')
     try {
-      const resp = await askVoice(audioBlob, 1, sessionId, isPremium)
+      const resp = await askVoice(
+        audioBlob,
+        1,
+        sessionId,
+        isPremium,
+        selectedLanguage !== 'auto' ? selectedLanguage : undefined,
+      )
       handleAssistantResponse(resp)
     } catch (err: any) {
       console.error('Voice ask error:', err)
-      setErrorBanner(err.message || 'Error processing speech. Please try again.')
+      const raw: string = err.message || ''
+      // Map backend errors to user-friendly strings
+      let friendly: string
+      if (raw.toLowerCase().includes('too short') || raw.toLowerCase().includes('speak')) {
+        friendly = '🎙️ Please hold the mic and speak a bit longer'
+      } else if (raw.toLowerCase().includes('permission') || raw.toLowerCase().includes('microphone')) {
+        friendly = '🔇 Microphone permission denied.'
+      } else if (raw.toLowerCase().includes('no speech') || raw.toLowerCase().includes('not detected')) {
+        friendly = '🤫 No speech detected — please try again in a quieter spot.'
+      } else if (raw.toLowerCase().includes('unavailable') || raw.toLowerCase().includes('recognition')) {
+        friendly = '⚡ Voice service busy — please try again in a moment.'
+      } else {
+        friendly = '❌ Something went wrong. Please try again.'
+      }
+      setErrorBanner(friendly)
       setMicState('idle')
     }
   }
@@ -237,7 +325,7 @@ export default function App() {
       handleAssistantResponse(resp, false)
     } catch (err: any) {
       console.error('Chat error:', err)
-      setErrorBanner(err.message || 'Failed to get answer. Please try again.')
+      setErrorBanner('❌ Failed to get answer. Please try again.')
       setMicState('idle')
     }
   }
@@ -319,7 +407,6 @@ export default function App() {
     const item = insights[idx]
     if (item.audio_base64) {
       playBase64Audio(item.audio_base64, () => {
-        // Wait 1.2s before next insight
         setTimeout(() => {
           playBriefingItem(idx + 1)
         }, 1200)
@@ -617,6 +704,25 @@ export default function App() {
 
       {/* ── Huge Centered Microphone Touch Target ──────────────────────────────── */}
       <footer className="w-full flex flex-col items-center justify-center pt-2 pb-1">
+
+        {/* ── Language Selector Chips ─────────────────────────────────────────── */}
+        <div className="flex items-center gap-1.5 flex-wrap justify-center mb-3 px-2">
+          {LANGUAGE_OPTIONS.map((lang) => (
+            <button
+              key={lang.value}
+              onClick={() => setSelectedLanguage(lang.value)}
+              className={`px-2.5 py-1 rounded-full text-[11px] font-semibold transition-all border ${
+                selectedLanguage === lang.value
+                  ? 'bg-brand/30 border-brand/60 text-amber-300 shadow-sm shadow-brand/20'
+                  : 'bg-white/5 border-white/10 text-slate-400 hover:bg-white/10 hover:text-slate-200'
+              }`}
+              title={lang.value === 'auto' ? 'Auto-detect language' : lang.value}
+            >
+              {lang.label}
+            </button>
+          ))}
+        </div>
+
         <div className="relative flex items-center justify-center">
           {/* Animated pulse wave rings when listening */}
           {micState === 'listening' && (
@@ -637,32 +743,27 @@ export default function App() {
           )}
 
           <button
+            id="mic-button"
             onClick={handleMicClick}
             onMouseDown={() => {
-              isHoldingRef.current = true
               if (micState === 'idle') startRecording()
             }}
             onMouseUp={() => {
-              if (isHoldingRef.current && micState === 'listening') {
-                isHoldingRef.current = false
-                stopRecording()
-              }
+              if (micState === 'listening') stopRecording()
             }}
-            onTouchStart={() => {
-              isHoldingRef.current = true
+            onTouchStart={(e) => {
+              e.preventDefault() // prevent ghost click
               if (micState === 'idle') startRecording()
             }}
-            onTouchEnd={() => {
-              if (isHoldingRef.current && micState === 'listening') {
-                isHoldingRef.current = false
-                stopRecording()
-              }
+            onTouchEnd={(e) => {
+              e.preventDefault()
+              if (micState === 'listening') stopRecording()
             }}
             className={`relative z-10 w-24 h-24 sm:w-28 sm:h-28 rounded-full flex flex-col items-center justify-center transition-all duration-300 shadow-2xl active:scale-95 ${
               micState === 'listening'
                 ? 'bg-gradient-to-br from-red-600 to-rose-700 shadow-red-500/50 scale-105'
                 : micState === 'thinking'
-                ? 'bg-gradient-to-br from-amber-600 to-orange-700 shadow-amber-500/50 scale-100'
+                ? 'bg-gradient-to-br from-amber-600 to-orange-700 shadow-amber-500/50 scale-100 cursor-not-allowed'
                 : micState === 'speaking'
                 ? 'bg-gradient-to-br from-emerald-600 to-teal-700 shadow-emerald-500/50 scale-105'
                 : 'bg-gradient-to-br from-brand to-amber-600 shadow-brand/40 hover:scale-105'
@@ -710,7 +811,7 @@ export default function App() {
           {micState === 'idle'
             ? 'Tap or hold mic to ask in your language'
             : micState === 'listening'
-            ? 'Tap mic again to finish'
+            ? 'Release mic to send'
             : micState === 'speaking'
             ? 'Tap mic to stop audio'
             : 'Fetching real database numbers...'}

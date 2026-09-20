@@ -19,7 +19,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.assistant import run_assistant
-from app.stt import transcribe_audio
+from app.stt import transcribe_audio, MIN_AUDIO_BYTES
 from app.tts import synthesize_speech
 from config import get_settings
 from database import get_db
@@ -59,24 +59,33 @@ class VoiceAskResponse(BaseModel):
     summary="End-to-end voice query pipeline: Audio -> STT -> LLM+Tools -> TTS -> Audio Response",
 )
 async def voice_ask(
-    audio: UploadFile = File(..., description="Audio recording blob (webm, wav, m4a, mp3)"),
+    audio: UploadFile = File(..., description="Audio recording blob (webm, wav, m4a, mp3, ogg)"),
     merchant_id: Optional[int] = Form(None),
     session_id: Optional[str] = Form(None),
     is_premium: Optional[bool] = Form(False),
+    language_hint: Optional[str] = Form(None, description="ISO-639-1 language code hint (e.g. 'te', 'hi', 'ta'). 'auto' or empty = auto-detect."),
     db: Session = Depends(get_db),
 ) -> VoiceAskResponse:
     settings = get_settings()
     actual_merchant_id = merchant_id or settings.merchant_id
     actual_session_id = session_id or str(uuid.uuid4())
 
+    # Normalise language_hint: treat "auto" / "" as None
+    lang_hint: Optional[str] = None
+    if language_hint and language_hint.strip().lower() not in ("", "auto"):
+        lang_hint = language_hint.strip().lower()
+
     total_start_time = time.perf_counter()
 
     # Read audio bytes
     audio_bytes = await audio.read()
-    if not audio_bytes:
+    if not audio_bytes or len(audio_bytes) < MIN_AUDIO_BYTES:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Empty audio file provided.",
+            detail=(
+                f"Audio is too short or empty ({len(audio_bytes)} bytes). "
+                "Please hold the mic and speak for at least 1 second."
+            ),
         )
 
     # 1. STT: Groq Whisper
@@ -86,19 +95,32 @@ async def voice_ask(
             audio_bytes=audio_bytes,
             filename=audio.filename or "audio.webm",
             content_type=audio.content_type or "audio/webm",
+            language_hint=lang_hint,
         )
+    except ValueError as exc:
+        # Size or config error — clean 400
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except RuntimeError as exc:
+        # Groq failed even after WAV fallback
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
     except Exception as exc:
-        logger.exception(f"STT failed: {exc}")
+        logger.exception("STT unexpected error: %s", exc)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Speech recognition error: {exc}",
+            detail="Speech recognition is temporarily unavailable. Please try again.",
         ) from exc
     stt_duration_ms = int((time.perf_counter() - stt_start) * 1000)
 
     if not stt_result.transcript.strip():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No speech detected in the audio. Please try speaking again.",
+            detail="No speech detected. Please speak clearly and try again.",
         )
 
     # 2. LLM: Gemini Assistant with function calling
@@ -114,10 +136,10 @@ async def voice_ask(
             is_premium=is_premium or False,
         )
     except Exception as exc:
-        logger.exception(f"Assistant error: {exc}")
+        logger.exception("Assistant error: %s", exc)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Assistant processing error: {exc}",
+            detail="Could not generate a response. Please try again.",
         ) from exc
     llm_duration_ms = int((time.perf_counter() - llm_start) * 1000)
 
@@ -130,14 +152,17 @@ async def voice_ask(
             language_code=assistant_result.language_code,
         )
     except Exception as exc:
-        logger.warning(f"TTS synthesis error (gracefully omitted): {exc}")
+        logger.warning("TTS synthesis error (gracefully omitted): %s", exc)
     tts_duration_ms = int((time.perf_counter() - tts_start) * 1000)
 
     total_duration_ms = int((time.perf_counter() - total_start_time) * 1000)
 
     logger.info(
-        f"Voice ask complete in {total_duration_ms}ms "
-        f"[STT: {stt_duration_ms}ms | LLM: {llm_duration_ms}ms | TTS: {tts_duration_ms}ms]"
+        "Voice ask complete in %dms [STT: %dms | LLM: %dms | TTS: %dms]",
+        total_duration_ms,
+        stt_duration_ms,
+        llm_duration_ms,
+        tts_duration_ms,
     )
 
     return VoiceAskResponse(
