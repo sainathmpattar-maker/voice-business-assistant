@@ -2,6 +2,17 @@
 
 **Polaris** is a voice-first, multilingual business intelligence assistant designed specifically for Indian kirana store merchants and small business owners.
 
+### 🌐 Live Production Deployment
+- **Frontend App (Vercel)**: [https://frontend-ochre-delta-63.vercel.app](https://frontend-ochre-delta-63.vercel.app)
+- **Backend API (Render)**: [https://polaris-backend-3pl7.onrender.com](https://polaris-backend-3pl7.onrender.com)
+- **Health Check**: [https://polaris-backend-3pl7.onrender.com/api/health](https://polaris-backend-3pl7.onrender.com/api/health)
+- **GitHub Repository**: [https://github.com/sainathmpattar-maker/voice-business-assistant](https://github.com/sainathmpattar-maker/voice-business-assistant)
+
+> [!NOTE]
+> **Render Free Tier Spin-Down & Keep-Warm**:
+> Render's free tier services spin down after 15 minutes of inactivity. When spinning back up, the first request may take 30–50 seconds.
+> To keep the service warm 24/7 for zero cold starts, you can configure a free HTTP monitor (such as [UptimeRobot](https://uptimerobot.com) or [Cron-Job.org](https://cron-job.org)) to ping `https://polaris-backend-3pl7.onrender.com/api/health` every 10 minutes.
+
 Merchants speak naturally in their native language (**Hindi, Tamil, Telugu, Kannada, Marathi, Bengali, Gujarati, Punjabi, Malayalam, English, or Hinglish**). Polaris transcribes the audio, understands the business intent, fetches **REAL** metrics from the merchant's transaction database via function calling, and **speaks a concise answer back in the same language and script** within seconds.
 
 ---
